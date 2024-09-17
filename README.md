@@ -1,1 +1,3 @@
-https://build-your-own.org/redis/ but in Rust
+## Build your own Redis but in Rust
+
+https://build-your-own.org/redis/

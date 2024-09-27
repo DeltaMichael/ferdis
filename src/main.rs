@@ -3,9 +3,7 @@ use nix::errno::Errno;
 use nix::unistd::{close, read, write};
 use nix::sys::socket::sockopt::ReuseAddr;
 use nix::sys::socket::accept;
-use nix::poll::PollFd;
-use nix::poll::PollFlags;
-use nix::poll::poll;
+use nix::sys::epoll::{epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp};
 use nix::fcntl::{fcntl, OFlag, FcntlArg};
 use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
@@ -200,40 +198,53 @@ fn main() {
             match listen(fd.as_raw_fd(), 128) {
                 Ok(()) => {
                     let mut fd2conn: HashMap<RawFd,Conn> = HashMap::new();
-                    let mut poll_args: Vec<PollFd> = Vec::new();
-                    let mut listening_id: PollFd;
+                    let mut events: Vec<EpollEvent> = Vec::with_capacity(10);
+                    for _ in 0..10 {
+                        events.push(EpollEvent::empty());
+                    }
                     if let Err(e) = set_nb_mode(fd) {
                         println!("Error {} while setting non-blocking mode on fd {}", e, fd);
                         return;
                     }
+                    let epollfd = epoll_create1(EpollCreateFlags::empty()).unwrap();
+                    let mut ev: EpollEvent = EpollEvent::new(EpollFlags::EPOLLIN, fd.try_into().unwrap());
+                    if let Err(e) = epoll_ctl(epollfd, EpollOp::EpollCtlAdd, fd, &mut ev) {
+                        println!("Error {} while calling epoll_ctl on fd {}", e, fd);
+                        return;
+                    }
                     loop {
-                        poll_args.clear();
-                        listening_id = PollFd::new(fd, PollFlags::POLLIN);
-                        for (fd, conn) in fd2conn.iter() {
-                            let mut pfd = PollFd::new(*fd, PollFlags::empty());
-                            if conn.state == ConnState::REQ {
-                                pfd.set_events(PollFlags::POLLERR | PollFlags::POLLIN);
-                            } else {
-                                pfd.set_events(PollFlags::POLLERR | PollFlags::POLLOUT);
-                            }
-                            poll_args.push(pfd);
-                        }
-                        if let Err(e) = poll(&mut poll_args, 1000) {
+
+                        if let Err(e) = epoll_wait(epollfd, &mut events, 1000) {
                             println!("Error {} while polling file descriptors", e);
                             return;
                         }
 
-                        for poll_fd in poll_args.iter() {
-                            let conn = fd2conn.get_mut(&poll_fd.as_raw_fd()).unwrap();
-                            connection_io(conn);
-                            if conn.state == ConnState::END {
-                                fd2conn.remove(&poll_fd.as_raw_fd());
-                                let _ = close(poll_fd.as_raw_fd());
+                        for event in events.iter() {
+                            if event.data() == fd.try_into().unwrap() {
+                                match accept(fd) {
+                                    Ok(conn_soc) => {
+                                        let _ = set_nb_mode(conn_soc);
+                                        ev = EpollEvent::new(EpollFlags::EPOLLIN | EpollFlags::EPOLLET, conn_soc.try_into().unwrap());
+                                        if let Err(e) = epoll_ctl(epollfd, EpollOp::EpollCtlAdd, conn_soc.try_into().unwrap(), &mut ev) {
+                                            println!("Error {} while calling epoll_ctl on fd {}", e, fd);
+                                            return;
+                                        }
+                                        fd2conn.insert(conn_soc, Conn::new(conn_soc));
+                                    },
+                                    Err(e) => {
+                                        println!("Error {} while calling epoll_ctl on fd {}", e, fd);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                if let Some(conn) = fd2conn.get_mut(&event.data().try_into().unwrap()) {
+                                    connection_io(conn);
+                                    if conn.state == ConnState::END {
+                                        fd2conn.remove(&event.data().try_into().unwrap());
+                                        let _ = close(event.data().try_into().unwrap());
+                                    }
+                                }
                             }
-                        }
-
-                        if let Some(_) = listening_id.revents() {
-                            let _ = accept_new_conn(&mut fd2conn, fd);
                         }
                     }
                 },

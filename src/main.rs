@@ -24,6 +24,7 @@ struct Conn {
     fd: RawFd,
     state: ConnState,
     rbuf_size: usize,
+    rbuf_received: usize,
     rbuf: [u8; 4 + K_MAX_MSG],
     wbuf_size: usize,
     wbuf_sent: usize,
@@ -32,7 +33,7 @@ struct Conn {
 
 impl Conn {
     fn new(fd: RawFd) -> Conn {
-        Conn{fd: fd, state: ConnState::REQ, rbuf_size: 0, rbuf: [0; 4 + K_MAX_MSG], wbuf_size: 0, wbuf_sent: 0, wbuf: [0; 4 + K_MAX_MSG]}
+        Conn{fd: fd, state: ConnState::REQ, rbuf_size: 0, rbuf: [0; 4 + K_MAX_MSG], rbuf_received: 0, wbuf_size: 0, wbuf_sent: 0, wbuf: [0; 4 + K_MAX_MSG]}
     }
 }
 
@@ -109,16 +110,25 @@ fn try_fill_buffer(conn: &mut Conn) -> bool {
         }
     }
     while try_one_request(conn) {}
+
+    let remain = conn.rbuf_size - conn.rbuf_received;
+    if remain > 0 {
+        conn.rbuf.copy_within(conn.rbuf_received.., 0);
+    }
+    conn.rbuf_size = remain;
+    conn.rbuf_received = 0;
+
     return conn.state == ConnState::REQ;
 }
 
 fn try_one_request(conn: &mut Conn) -> bool {
-    if conn.rbuf_size < 4 {
+    if conn.rbuf_size - conn.rbuf_received < 4 {
         return false;
     }
 
     let mut len_buf: [u8; 4] = [0;4];
-    len_buf.copy_from_slice(&conn.rbuf[0..4]);
+    len_buf.copy_from_slice(&conn.rbuf[conn.rbuf_received..conn.rbuf_received + 4]);
+    conn.rbuf_received += 4;
     let length = u32::from_le_bytes(len_buf);
 
     if length > u32::try_from(K_MAX_MSG).unwrap() {
@@ -127,21 +137,17 @@ fn try_one_request(conn: &mut Conn) -> bool {
         return false;
     }
 
-    if 4 + length > u32::try_from(conn.rbuf_size).unwrap() {
+    if length > u32::try_from(conn.rbuf_size - conn.rbuf_received).unwrap() {
         return false;
     }
-
-    println!("Client says {}", String::from_utf8(conn.rbuf[4..(4 + length).try_into().unwrap()].to_vec()).unwrap());
+    let end = u32::try_from(conn.rbuf_received).unwrap() + length;
+    println!("Client says {}", String::from_utf8(conn.rbuf[conn.rbuf_received..end.try_into().unwrap()].to_vec()).unwrap());
 
     conn.wbuf[0..4].copy_from_slice(&length.to_le_bytes());
-    conn.wbuf[4..(4 + length).try_into().unwrap()].copy_from_slice(&conn.rbuf[4..(4 + length).try_into().unwrap()]);
+    conn.wbuf[4..(4 + length).try_into().unwrap()].copy_from_slice(&conn.rbuf[conn.rbuf_received..end.try_into().unwrap()]);
     conn.wbuf_size = 4 + usize::try_from(length).unwrap();
 
-    let remain = conn.rbuf_size - 4 - usize::try_from(length).unwrap();
-    if remain > 0 {
-        conn.rbuf.copy_within(4 + usize::try_from(length).unwrap().., 0);
-    }
-    conn.rbuf_size = remain;
+    conn.rbuf_received += usize::try_from(length).unwrap();
     conn.state = ConnState::RES;
 
     state_res(conn);

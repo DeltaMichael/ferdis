@@ -12,8 +12,15 @@ use std::os::fd::RawFd;
 use std::str::FromStr;
 use std::result::Result;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 const K_MAX_MSG: usize = 4096;
+use once_cell::sync::Lazy;
+
+static STORAGE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| {
+    let m = HashMap::new();
+    Mutex::new(m)
+});
 
 #[derive(PartialEq)]
 enum ConnState {
@@ -32,6 +39,11 @@ struct Conn {
     wbuf: [u8; 4 + K_MAX_MSG],
 }
 
+struct Response {
+    length: u32,
+    rescode: u32
+}
+
 impl Conn {
     fn new(fd: RawFd) -> Conn {
         Conn{fd: fd, state: ConnState::REQ, rbuf_size: 0, rbuf: [0; 4 + K_MAX_MSG], wbuf_size: 0, wbuf_sent: 0, wbuf: [0; 4 + K_MAX_MSG]}
@@ -39,8 +51,7 @@ impl Conn {
 }
 
 fn set_nb_mode(fd: RawFd) -> Result<usize, Errno> {
-    if let Err(e) = fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)) {
-        return Err(e);
+    if let Err(e) = fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)) { return Err(e);
     }
     Ok(0)
 }
@@ -114,8 +125,69 @@ fn try_fill_buffer(conn: &mut Conn) -> bool {
     return conn.state == ConnState::REQ;
 }
 
+fn do_request(req_buf: &[u8], res_buf: &mut [u8]) -> Result<Response, Errno> {
+    match parse_request(req_buf) {
+        Ok(r) => {
+            let command: Vec<&str> = r.split(" ").collect();
+            match command[0] {
+                "get" => {
+                    // do get
+                    return do_get(command, res_buf);
+                },
+                "set" => {
+                    // do set
+                    return do_set(command);
+                },
+                "del" => {
+                    // do del
+                    return do_del(command);
+                },
+                _ => {
+                    let out = b"Unknown command";
+                    res_buf[0..out.len()].copy_from_slice(out);
+                    return Ok(Response { length: 4 + u32::try_from(out.len()).unwrap(), rescode: 1 });
+                }
+            }
+        },
+        Err(e) => {
+            return Err(e);
+        }
+    }
+}
+
+fn do_get(command: Vec<&str>,res_buf: &mut [u8]) -> Result<Response,Errno> {
+    let storage = STORAGE.lock().unwrap();
+    if !storage.contains_key(command[1]) {
+        return Ok(Response {length: 4, rescode: 2});
+    }
+    let out: Vec<u8> = storage.get(command[1]).unwrap().bytes().collect();
+    res_buf[0..out.len()].copy_from_slice(&out);
+
+    return Ok(Response { length: 4 + u32::try_from(out.len()).unwrap(), rescode: 0 });
+}
+
+fn do_set(command: Vec<&str>) -> Result<Response,Errno> {
+    if command.len() < 3 {
+        return Ok(Response {length: 4, rescode: 1});
+    }
+    let mut storage = STORAGE.lock().unwrap();
+    storage.insert(command[1].to_string(), command[2].to_string());
+    Ok(Response {length: 4, rescode: 0})
+}
+
+fn do_del(command: Vec<&str>) -> Result<Response,Errno> {
+    let mut storage = STORAGE.lock().unwrap();
+    storage.remove(&command[1].to_string());
+    Ok(Response {length: 4, rescode: 0})
+}
+
+fn parse_request(req_buf: &[u8]) -> Result<String, Errno> {
+    Ok(String::from_utf8(req_buf.to_vec()).unwrap())
+}
+
 fn try_one_request(conn: &mut Conn) -> bool {
     if conn.rbuf_size < 4 {
+        // not enough data in the buffer, retry
         return false;
     }
 
@@ -130,22 +202,35 @@ fn try_one_request(conn: &mut Conn) -> bool {
     }
 
     if 4 + length > u32::try_from(conn.rbuf_size).unwrap() {
+        // not enough data in the buffer, retry
         return false;
     }
 
     println!("Client says {}", String::from_utf8(conn.rbuf[4..(4 + length).try_into().unwrap()].to_vec()).unwrap());
+    // get one request and generate a response
+    match do_request(&conn.rbuf[4..4 + usize::try_from(length).unwrap()], &mut conn.wbuf[8..]) {
+        Ok(res) => {
+            conn.wbuf[0..4].copy_from_slice(&res.length.to_le_bytes());
+            conn.wbuf[4..8].copy_from_slice(&res.rescode.to_le_bytes());
+            conn.wbuf_size += 4 + usize::try_from(res.length).unwrap();
+        },
+        Err(_) => {
+            println!("Could not do request");
+            conn.state = ConnState::END;
+            return false;
+        }
+    }
 
-    conn.wbuf[0..4].copy_from_slice(&length.to_le_bytes());
-    conn.wbuf[4..(4 + length).try_into().unwrap()].copy_from_slice(&conn.rbuf[4..(4 + length).try_into().unwrap()]);
-    conn.wbuf_size = 4 + usize::try_from(length).unwrap();
 
+    // remove the request from the buffer
     let remain = conn.rbuf_size - 4 - usize::try_from(length).unwrap();
     if remain > 0 {
         conn.rbuf.copy_within(4 + usize::try_from(length).unwrap().., 0);
     }
     conn.rbuf_size = remain;
-    conn.state = ConnState::RES;
 
+    // change state
+    conn.state = ConnState::RES;
     state_res(conn);
 
     return conn.state == ConnState::REQ;

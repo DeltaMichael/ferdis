@@ -1,3 +1,5 @@
+mod oa_map;
+
 use nix::sys::socket::*;
 use nix::errno::Errno;
 use nix::unistd::{close, read, write};
@@ -14,11 +16,13 @@ use std::result::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use oa_map::OAMap;
+
 const K_MAX_MSG: usize = 4096;
 use once_cell::sync::Lazy;
 
-static STORAGE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| {
-    let m = HashMap::new();
+static STORAGE: Lazy<Mutex<OAMap<String, String>>> = Lazy::new(|| {
+    let m = OAMap::new();
     Mutex::new(m)
 });
 
@@ -157,10 +161,10 @@ fn do_request(req_buf: &[u8], res_buf: &mut [u8]) -> Result<Response, Errno> {
 
 fn do_get(command: Vec<&str>,res_buf: &mut [u8]) -> Result<Response,Errno> {
     let storage = STORAGE.lock().unwrap();
-    if !storage.contains_key(command[1]) {
+    if !storage.contains_key(command[1].to_string()) {
         return Ok(Response {length: 4, rescode: 2});
     }
-    let out: Vec<u8> = storage.get(command[1]).unwrap().bytes().collect();
+    let out: Vec<u8> = storage.get(command[1].to_string()).unwrap().bytes().collect();
     res_buf[0..out.len()].copy_from_slice(&out);
 
     return Ok(Response { length: 4 + u32::try_from(out.len()).unwrap(), rescode: 0 });
@@ -171,13 +175,13 @@ fn do_set(command: Vec<&str>) -> Result<Response,Errno> {
         return Ok(Response {length: 4, rescode: 1});
     }
     let mut storage = STORAGE.lock().unwrap();
-    storage.insert(command[1].to_string(), command[2].to_string());
+    storage.put(command[1].to_string(), command[2].to_string());
     Ok(Response {length: 4, rescode: 0})
 }
 
 fn do_del(command: Vec<&str>) -> Result<Response,Errno> {
     let mut storage = STORAGE.lock().unwrap();
-    storage.remove(&command[1].to_string());
+    storage.delete(command[1].to_string());
     Ok(Response {length: 4, rescode: 0})
 }
 

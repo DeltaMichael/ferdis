@@ -193,7 +193,6 @@ fn do_request(req_buf: &[u8]) -> Result<Response, Errno> {
                 },
                 _ => {
                     let out = out_err(1, "Unknown command");
-                    // res_buf[0..out.len()].copy_from_slice(&out);
                     return Ok(Response { length: u32::try_from(out.len()).unwrap(), message: out});
                 }
             }
@@ -215,8 +214,6 @@ fn do_get(command: Vec<&str>) -> Result<Response,Errno> {
         let out = out_nil();
         return Ok(Response {length: u32::try_from(out.len()).unwrap(), message: out});
     }
-    // let out: Vec<u8> = storage.get(command[1].to_string()).unwrap().bytes().collect();
-    // res_buf[0..out.len()].copy_from_slice(&out);
     let value = storage.get(command[1].to_string()).unwrap();
     let out = out_str(&value);
 
@@ -279,8 +276,7 @@ fn out_arr(values: Vec<&str>) -> Vec<u8> {
     (ResType::ARR as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
     (values.len() as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
     for val in values {
-        (val.len() as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
-        val.bytes().for_each(|b| out.push(b));
+        out_str(val).iter().for_each(|b| out.push(*b));
     }
     return out;
 }

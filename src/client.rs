@@ -83,12 +83,9 @@ fn read_response(fd: RawFd) -> Result<FerdisResponse, Errno> {
             return Err(e);
         }
     }
-    // println!("Length: {}", length);
-    // length -= 4;
     let response;
     match read_full(fd, &mut rbuf[..length.try_into().unwrap()]) {
         Ok(_) => {
-            println!("[{:?}]", String::from_utf8(rbuf[..length.try_into().unwrap()].to_vec()).unwrap());
             response = deserialize_response(&mut rbuf[..length.try_into().unwrap()]);
             return Ok(response);
         }

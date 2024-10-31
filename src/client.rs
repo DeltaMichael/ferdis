@@ -3,11 +3,14 @@ use nix::errno::Errno;
 use std::os::fd::RawFd;
 use nix::unistd::{close, read, write};
 use std::str::FromStr;
+use crate::server::ResType;
 
 const K_MAX_MSG: usize = 4096;
 
+#[derive(Debug)]
 pub struct FerdisResponse {
-    pub code: u32,
+    pub res_type: ResType,
+    pub res_code: u32,
     pub message: Option<String>
 }
 
@@ -69,9 +72,7 @@ fn send_request(fd: RawFd, text: &str) -> Result<usize, Errno> {
 
 fn read_response(fd: RawFd) -> Result<FerdisResponse, Errno> {
     let mut len_buf: [u8; 4] = [0; 4];
-    let mut res_code_buf: [u8; 4] = [0; 4];
     let mut length;
-    let res_code: u32;
     let mut rbuf: [u8; K_MAX_MSG] = [0; K_MAX_MSG];
     match read_full(fd, &mut len_buf) {
         Ok(_) => {
@@ -82,35 +83,55 @@ fn read_response(fd: RawFd) -> Result<FerdisResponse, Errno> {
             return Err(e);
         }
     }
-
-    match read_full(fd, &mut res_code_buf) {
+    // println!("Length: {}", length);
+    // length -= 4;
+    let response;
+    match read_full(fd, &mut rbuf[..length.try_into().unwrap()]) {
         Ok(_) => {
-            res_code = u32::from_le_bytes(res_code_buf);
-        },
+            println!("[{:?}]", String::from_utf8(rbuf[..length.try_into().unwrap()].to_vec()).unwrap());
+            response = deserialize_response(&mut rbuf[..length.try_into().unwrap()]);
+            return Ok(response);
+        }
         Err(e) => {
             println!("read() error {}", e);
             return Err(e);
         }
     }
+}
 
-    length -= 4;
-    let response;
-    if length > 0 {
-        match read_full(fd, &mut rbuf[..length.try_into().unwrap()]) {
-            Ok(_) => {
-                // println!("[{}] {}", res_code, String::from_utf8(rbuf[..length.try_into().unwrap()].to_vec()).unwrap());
-                response = Ok(FerdisResponse {code: res_code, message: Some(String::from_utf8(rbuf[..length.try_into().unwrap()].to_vec()).unwrap())});
-            }
-            Err(e) => {
-                println!("read() error {}", e);
-                return Err(e);
-            }
-        }
-    } else {
-        // println!("[{}]", res_code);
-        response = Ok(FerdisResponse{code: res_code, message: None});
+pub fn deserialize_response(rbuf: &mut[u8]) -> FerdisResponse {
+    let res_type_u32 = deserialize_u32(&mut rbuf[0..4]);
+    let res_type = ResType::from_u32(res_type_u32);
+    match res_type {
+        ResType::NIL => {
+            return FerdisResponse{res_type: res_type, res_code: 0, message: None};
+        },
+        ResType::ERR => {
+            let err_code = deserialize_u32(&mut rbuf[4..8]);
+            let message_length = deserialize_u32(&mut rbuf[8..12]);
+            let message = deserialize_string(&mut rbuf[12..], usize::try_from(message_length).unwrap());
+            return FerdisResponse{res_type: res_type, res_code: err_code, message: Some(message) };
+        },
+        ResType::STR => {
+            let message_length = deserialize_u32(&mut rbuf[4..8]);
+            let message = deserialize_string(&mut rbuf[8..], usize::try_from(message_length).unwrap());
+            return FerdisResponse{res_type: res_type, res_code: 0, message: Some(message) };
+        },
+        ResType::ARR => {
+            panic!("Implement arrays");
+        },
     }
-    return response;
+}
+
+pub fn deserialize_u32(rbuf: &mut[u8]) -> u32 {
+    let mut buf: [u8; 4] = [0; 4];
+    buf.copy_from_slice(&rbuf[0..4]);
+    let val = u32::from_le_bytes(buf);
+    return val;
+}
+
+pub fn deserialize_string(rbuf: &mut[u8], length: usize) -> String {
+    String::from_utf8(rbuf[..length.try_into().unwrap()].to_vec()).unwrap()
 }
 
 pub fn send_message(req: String) -> Result<FerdisResponse, Errno> {

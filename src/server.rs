@@ -13,7 +13,6 @@ use std::str::FromStr;
 use std::result::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
-
 use crate::oa_map::OAMap;
 
 const K_MAX_MSG: usize = 4096;
@@ -31,6 +30,54 @@ enum ConnState {
     END
 }
 
+#[derive(Debug)]
+pub enum ResType {
+   NIL = 0,
+   ERR = 1,
+   STR = 2,
+   ARR = 3
+}
+
+impl ResType {
+
+    pub fn as_str(&self) -> String {
+        match self {
+            ResType::NIL => {
+                String::from("NIL")
+            },
+            ResType::ERR => {
+                String::from("ERR")
+            },
+            ResType::STR => {
+                String::from("STR")
+            },
+            ResType::ARR => {
+                String::from("ARR")
+            },
+        }
+    }
+
+    pub fn from_u32(value: u32) -> ResType {
+        match value {
+            0 => {
+                return ResType::NIL;
+            },
+            1 => {
+                return ResType::ERR;
+            },
+            2 => {
+                return ResType::STR;
+            },
+            3 => {
+                return ResType::ARR;
+            },
+            _ => {
+                panic!("Unknown value {}", value);
+            }
+        }
+    }
+}
+
 struct Conn {
     fd: RawFd,
     state: ConnState,
@@ -43,7 +90,7 @@ struct Conn {
 
 struct Response {
     length: u32,
-    rescode: u32
+    message: Vec<u8>
 }
 
 impl Conn {
@@ -115,7 +162,7 @@ fn try_fill_buffer(conn: &mut Conn) -> bool {
                         return false;
                     },
                     _ => {
-                        println!("read() error");
+                        println!("read() error while filling buffer");
                         conn.state = ConnState::END;
                         return false;
                     }
@@ -127,14 +174,14 @@ fn try_fill_buffer(conn: &mut Conn) -> bool {
     return conn.state == ConnState::REQ;
 }
 
-fn do_request(req_buf: &[u8], res_buf: &mut [u8]) -> Result<Response, Errno> {
+fn do_request(req_buf: &[u8]) -> Result<Response, Errno> {
     match parse_request(req_buf) {
         Ok(r) => {
             let command: Vec<&str> = r.split(" ").collect();
             match command[0] {
                 "get" => {
                     // do get
-                    return do_get(command, res_buf);
+                    return do_get(command);
                 },
                 "set" => {
                     // do set
@@ -145,9 +192,9 @@ fn do_request(req_buf: &[u8], res_buf: &mut [u8]) -> Result<Response, Errno> {
                     return do_del(command);
                 },
                 _ => {
-                    let out = b"Unknown command";
-                    res_buf[0..out.len()].copy_from_slice(out);
-                    return Ok(Response { length: 4 + u32::try_from(out.len()).unwrap(), rescode: 1 });
+                    let out = out_err(1, "Unknown command");
+                    // res_buf[0..out.len()].copy_from_slice(&out);
+                    return Ok(Response { length: u32::try_from(out.len()).unwrap(), message: out});
                 }
             }
         },
@@ -157,30 +204,85 @@ fn do_request(req_buf: &[u8], res_buf: &mut [u8]) -> Result<Response, Errno> {
     }
 }
 
-fn do_get(command: Vec<&str>,res_buf: &mut [u8]) -> Result<Response,Errno> {
+fn do_get(command: Vec<&str>) -> Result<Response,Errno> {
+    if command.len() < 2 {
+        let out = out_err(2, "Insufficient arguments");
+        return Ok(Response {length: u32::try_from(out.len()).unwrap(), message: out});
+    }
+
     let storage = STORAGE.lock().unwrap();
     if !storage.contains_key(command[1].to_string()) {
-        return Ok(Response {length: 4, rescode: 2});
+        let out = out_nil();
+        return Ok(Response {length: u32::try_from(out.len()).unwrap(), message: out});
     }
-    let out: Vec<u8> = storage.get(command[1].to_string()).unwrap().bytes().collect();
-    res_buf[0..out.len()].copy_from_slice(&out);
+    // let out: Vec<u8> = storage.get(command[1].to_string()).unwrap().bytes().collect();
+    // res_buf[0..out.len()].copy_from_slice(&out);
+    let value = storage.get(command[1].to_string()).unwrap();
+    let out = out_str(&value);
 
-    return Ok(Response { length: 4 + u32::try_from(out.len()).unwrap(), rescode: 0 });
+    return Ok(Response { length: u32::try_from(out.len()).unwrap(), message: out });
 }
 
 fn do_set(command: Vec<&str>) -> Result<Response,Errno> {
     if command.len() < 3 {
-        return Ok(Response {length: 4, rescode: 1});
+        let out = out_err(2, "Insufficient arguments");
+        return Ok(Response {length: u32::try_from(out.len()).unwrap(), message: out});
     }
     let mut storage = STORAGE.lock().unwrap();
     storage.put(command[1].to_string(), command[2].to_string());
-    Ok(Response {length: 4, rescode: 0})
+    let out = out_nil();
+    Ok(Response {length: u32::try_from(out.len()).unwrap(), message: out})
 }
 
 fn do_del(command: Vec<&str>) -> Result<Response,Errno> {
+    if command.len() < 2 {
+        let out = out_err(2, "Insufficient arguments");
+        return Ok(Response {length: u32::try_from(out.len()).unwrap(), message: out});
+    }
+
     let mut storage = STORAGE.lock().unwrap();
-    storage.delete(command[1].to_string());
-    Ok(Response {length: 4, rescode: 0})
+    if storage.contains_key(command[1].to_string()) {
+        let val = storage.get(command[1].to_string());
+        let out = out_str(&val.unwrap());
+        storage.delete(command[1].to_string());
+        return Ok(Response {length: u32::try_from(out.len()).unwrap(), message: out});
+    }
+    let out = out_nil();
+    return Ok(Response {length: u32::try_from(out.len()).unwrap(), message: out});
+}
+
+fn out_nil() -> Vec<u8> {
+    let mut out = Vec::new();
+    (ResType::NIL as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
+    return out;
+}
+
+fn out_str(val: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    (ResType::STR as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
+    (val.len() as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
+    val.bytes().for_each(|b| out.push(b));
+    return out;
+}
+
+fn out_err(code: u32, message: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    (ResType::ERR as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
+    code.to_le_bytes().iter().for_each(|b| out.push(*b));
+    (message.len() as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
+    message.bytes().for_each(|b| out.push(b));
+    return out;
+}
+
+fn out_arr(values: Vec<&str>) -> Vec<u8> {
+    let mut out = Vec::new();
+    (ResType::ARR as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
+    (values.len() as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
+    for val in values {
+        (val.len() as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
+        val.bytes().for_each(|b| out.push(b));
+    }
+    return out;
 }
 
 fn parse_request(req_buf: &[u8]) -> Result<String, Errno> {
@@ -210,10 +312,10 @@ fn try_one_request(conn: &mut Conn) -> bool {
 
     println!("Client says {}", String::from_utf8(conn.rbuf[4..(4 + length).try_into().unwrap()].to_vec()).unwrap());
     // get one request and generate a response
-    match do_request(&conn.rbuf[4..4 + usize::try_from(length).unwrap()], &mut conn.wbuf[8..]) {
+    match do_request(&conn.rbuf[4..4 + usize::try_from(length).unwrap()]) {
         Ok(res) => {
             conn.wbuf[0..4].copy_from_slice(&res.length.to_le_bytes());
-            conn.wbuf[4..8].copy_from_slice(&res.rescode.to_le_bytes());
+            conn.wbuf[4..4 + usize::try_from(res.length).unwrap()].copy_from_slice(&res.message);
             conn.wbuf_size += 4 + usize::try_from(res.length).unwrap();
         },
         Err(_) => {
@@ -266,7 +368,7 @@ fn try_flush_buffer(conn: &mut Conn) -> bool {
                         return false;
                     },
                     _ => {
-                        println!("read() error");
+                        println!("read() error while flushing buffer");
                         conn.state = ConnState::END;
                         return false;
                     }

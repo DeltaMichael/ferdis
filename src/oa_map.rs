@@ -137,6 +137,23 @@ impl<K: Hashable + Clone, V: Clone> OAMap<K, V> where K: PartialEq{
         }
     }
 
+    pub fn keys(&self) -> Vec<K> {
+        let mut out: Vec<K> = Vec::new();
+        for entry in self.arr.iter() {
+            if !entry.borrow().empty {
+                match &entry.borrow().key {
+                    Some(k) => {
+                        out.push(k.clone());
+                    },
+                    None => {
+                        // shouldn't happen
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
     fn resize(&mut self) {
         let mut map: OAMap<K, V> = OAMap::new_with_capacity(self.capacity * 2);
         for entry in self.arr.iter() {

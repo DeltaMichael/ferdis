@@ -191,6 +191,10 @@ fn do_request(req_buf: &[u8]) -> Result<Response, Errno> {
                     // do del
                     return do_del(command);
                 },
+                "keys" => {
+                    // do keys
+                    return do_keys(command);
+                },
                 _ => {
                     let out = out_err(1, "Unknown command");
                     return Ok(Response { length: u32::try_from(out.len()).unwrap(), message: out});
@@ -201,6 +205,22 @@ fn do_request(req_buf: &[u8]) -> Result<Response, Errno> {
             return Err(e);
         }
     }
+}
+fn do_keys(command: Vec<&str>) -> Result<Response,Errno> {
+    if command.len() > 1 {
+        let out = out_err(3, "Too many arguments");
+        return Ok(Response {length: u32::try_from(out.len()).unwrap(), message: out});
+    }
+
+    let storage = STORAGE.lock().unwrap();
+    let keys = storage.keys();
+    let out;
+    if keys.is_empty() {
+        out = out_nil();
+    } else {
+        out = out_arr(storage.keys());
+    }
+    return Ok(Response { length: u32::try_from(out.len()).unwrap(), message: out });
 }
 
 fn do_get(command: Vec<&str>) -> Result<Response,Errno> {
@@ -271,12 +291,12 @@ fn out_err(code: u32, message: &str) -> Vec<u8> {
     return out;
 }
 
-fn out_arr(values: Vec<&str>) -> Vec<u8> {
+fn out_arr(values: Vec<String>) -> Vec<u8> {
     let mut out = Vec::new();
     (ResType::ARR as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
     (values.len() as u32).to_le_bytes().iter().for_each(|b| out.push(*b));
     for val in values {
-        out_str(val).iter().for_each(|b| out.push(*b));
+        out_str(&val).iter().for_each(|b| out.push(*b));
     }
     return out;
 }

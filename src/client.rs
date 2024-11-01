@@ -115,7 +115,21 @@ pub fn deserialize_response(rbuf: &mut[u8]) -> FerdisResponse {
             return FerdisResponse{res_type: res_type, res_code: 0, message: Some(message) };
         },
         ResType::ARR => {
-            panic!("Implement arrays");
+            let mut strings: Vec<String> = Vec::new();
+            let arr_len = deserialize_u32(&mut rbuf[4..8]);
+            let mut start = 8;
+            for _ in 0..arr_len {
+                let resp = deserialize_response(&mut rbuf[start..]);
+                let message = resp.message.unwrap();
+                start += 8;
+                start += message.len();
+                strings.push(message);
+            }
+            let mut out = String::new();
+            out.push_str("[");
+            out.push_str(&strings.join(", "));
+            out.push_str("]");
+            return FerdisResponse{res_type: res_type, res_code: 0, message: Some(out) };
         },
     }
 }
